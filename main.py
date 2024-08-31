@@ -1,10 +1,10 @@
-from src.data_preprocessing.inmet_preprocessing import get_inmet_stations_list, read_inmet_climate_data
+from src.data_preprocessing.inmet_preprocessing import extract_inmet_station_codes, read_inmet_climate_data
 
 
 def preprocess_inmet_per_station():
     """Process INMET climate data for each station and handle errors."""
     errors = []
-    stations = get_inmet_stations_list()
+    stations = extract_inmet_station_codes()
     total_stations = len(stations)
 
     print(f"Processing {total_stations} stations...")
@@ -15,8 +15,8 @@ def preprocess_inmet_per_station():
                 station_filter=station,
                 output_file_name=f"merged_{station}.csv"
             )
-        except ValueError:
-            errors.append(station)
+        except ValueError as e:
+            errors.append(f"{station} - {e}")
 
         if i % 10 == 0:
             print(f"Processed {round(i * 100 / total_stations, 2)}%...")
