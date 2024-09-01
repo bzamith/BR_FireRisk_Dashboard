@@ -8,7 +8,10 @@ import pandas as pd
 
 from tqdm import tqdm
 
-from ..utils import get_all_file_paths
+from ..utils import (
+    calculate_angstrom_risk, calculate_telicyn_risk,
+    get_all_file_paths
+)
 
 # Paths for data directories
 RAW_DATA_INMET_PATH = "data/raw_data/INMET"
@@ -101,9 +104,82 @@ def __extract_inmet_data(file_path: str) -> pd.DataFrame:
     return df
 
 
+def __group_daily_inmet_data(df: pd.DataFrame) -> pd.DataFrame:
+    df['hora'] = pd.to_datetime(df['hora'], format='%H:%M').dt.hour
+
+    df_13 = df[df['hora'] == 13]
+    df_13 = df_13.rename(
+        columns={
+            'pressao_atmosferica': 'pressao_atmosferica_13',
+            'temperatura_ar': 'temperatura_ar_13',
+            'temperatura_ponto_orvalho': 'temperatura_ponto_orvalho_13',
+            'umidade_relativa': 'umidade_relativa_13',
+            'velocidade_vento': 'velocidade_vento_13',
+            'precipitacao_total_interpolacao': 'precipitacao_total_interpolacao_13',
+            'pressao_atmosferica_interpolacao': 'pressao_atmosferica_interpolacao_13',
+            'temperatura_ar_interpolacao': 'temperatura_ar_interpolacao_13',
+            'temperatura_ponto_orvalho_interpolacao': 'temperatura_ponto_orvalho_interpolacao_13',
+            'umidade_relativa_interpolacao': 'umidade_relativa_interpolacao_13',
+            'velocidade_vento_interpolacao': 'velocidade_vento_interpolacao_13',
+        }
+    )
+
+    df = df.groupby('data').agg({
+        'regiao': 'first',
+        'uf': 'first',
+        'estacao': 'first',
+        'codigo_estacao': 'first',
+        'latitude': 'first',
+        'longitude': 'first',
+        'altitude': 'first',
+        'data_fundacao': 'first',
+        'precipitacao_total': 'sum',
+        'pressao_atmosferica': 'mean',
+        'temperatura_ar': 'mean',
+        'temperatura_ponto_orvalho': 'mean',
+        'umidade_relativa': 'mean',
+        'velocidade_vento': 'mean',
+        'precipitacao_total_interpolacao': 'max',
+        'pressao_atmosferica_interpolacao': 'max',
+        'temperatura_ar_interpolacao': 'max',
+        'temperatura_ponto_orvalho_interpolacao': 'max',
+        'umidade_relativa_interpolacao': 'max',
+        'velocidade_vento_interpolacao': 'max',
+    }).reset_index()
+
+    df = df.merge(
+        df_13[[
+            'data',
+            'pressao_atmosferica_13',
+            'temperatura_ar_13',
+            'temperatura_ponto_orvalho_13',
+            'umidade_relativa_13',
+            'velocidade_vento_13',
+            'precipitacao_total_interpolacao_13',
+            'pressao_atmosferica_interpolacao_13',
+            'temperatura_ar_interpolacao_13',
+            'temperatura_ponto_orvalho_interpolacao_13',
+            'umidade_relativa_interpolacao_13',
+            'velocidade_vento_interpolacao_13'
+        ]],
+        on='data',
+        how='left'
+    )
+
+    return df
+
+
+def __calculate_days_without_rain_inmet_data(df: pd.DataFrame) -> pd.DataFrame:
+    df['rained'] = df['precipitacao_total'] == 0
+    df['rain_sequence'] = df['rained'].ne(df['rained'].shift()).cumsum()
+    df['dias_sem_chuva'] = df.groupby('rain_sequence').cumcount() + 1
+    df = df.drop(columns=['rained', 'rain_sequence'])
+    return df
+
+
 def __preprocess_inmet_data(file_paths: List[str]) -> pd.DataFrame:
     """Read, preprocess, and merge INMET data from files."""
-    output_dfs = []
+    dfs = []
 
     for file_path in file_paths:
         file_info = __extract_inmet_station_metadata(file_path)
@@ -111,35 +187,37 @@ def __preprocess_inmet_data(file_paths: List[str]) -> pd.DataFrame:
         for key, value in file_info.items():
             data_df[key] = value
         data_df = data_df[EXPECTED_INMET_INFO_KEYS + EXPECTED_INMET_DATA_COLS]
-        output_dfs.append(data_df)
+        dfs.append(data_df)
 
-    output_df = pd.concat(output_dfs, axis=0)
+    df = pd.concat(dfs, axis=0)
 
-    if output_df[EXPECTED_INMET_DATA_COLS].isna().all(axis=0).all():
+    if df[EXPECTED_INMET_DATA_COLS].isna().all(axis=0).all():
         raise Exception(f"{os.path.basename(file_path)}: Only null values found.")
 
-    output_df = output_df.dropna(subset=['data', 'hora'])
-    if output_df.shape[0] == 0:
+    df = df.dropna(subset=['data', 'hora'])
+    if df.shape[0] == 0:
         raise Exception(f"{os.path.basename(file_path)}: No rows left after droping the data and hora NaNs.")
 
-    output_df['data_hora'] = output_df['data'] + ' ' + output_df['hora']
-    output_df['data_hora'] = pd.to_datetime(output_df['data_hora'], format='%Y-%m-%d %H:%M').dt.tz_localize('UTC')
-    output_df = output_df.drop(columns=['data', 'hora'])
-
-    output_df = output_df.sort_values(by='data_hora')
+    df = df.sort_values(by=['data', 'hora'])
     for info_col in EXPECTED_INMET_INFO_KEYS:
-        output_df[info_col] = output_df[info_col].ffill().bfill()
+        df[info_col] = df[info_col].ffill().bfill()
 
     for col in INMET_CLIMATE_DATA_COLS:
         interpolacao_col = f"{col}_interpolacao"
-        if interpolacao_col not in output_df.columns:
-            output_df[interpolacao_col] = False
-        missing_before = output_df[col].isna()
-        output_df[col] = output_df[col].interpolate(method='linear', limit_direction='both')
-        output_df[interpolacao_col] = output_df[interpolacao_col] | missing_before & output_df[col].notna()
-        output_df[col] = round(output_df[col], 2)
+        if interpolacao_col not in df.columns:
+            df[interpolacao_col] = False
+        missing_before = df[col].isna()
+        df[col] = df[col].interpolate(method='linear', limit_direction='both')
+        df[interpolacao_col] = df[interpolacao_col] | missing_before & df[col].notna()
+        df[col] = df[col]
 
-    return output_df
+    df = __group_daily_inmet_data(df)
+    df = __calculate_days_without_rain_inmet_data(df)
+
+    df = calculate_angstrom_risk(df)
+    df = calculate_telicyn_risk(df)
+
+    return df.round(2)
 
 
 def extract_inmet_station_codes() -> List[str]:
@@ -147,7 +225,7 @@ def extract_inmet_station_codes() -> List[str]:
     file_paths = get_all_file_paths(RAW_DATA_INMET_PATH, "CSV")
     stations = {re.search(r"_A\d{3}_", os.path.basename(path)).group()[1:5] for path in file_paths if
                 re.search(r"_A\d{3}_", os.path.basename(path))}
-    return list(set(stations))
+    return sorted(list(set(stations)))
 
 
 def read_inmet_climate_data() -> None:
@@ -168,8 +246,8 @@ def read_inmet_climate_data() -> None:
 
         station_inmet_data.to_csv(f"{output_dir}/inmet_{station}.csv", index=False)
         
-        stations_info_data.append(stations_info_data)
-        inmet_data.append(inmet_data)
+        stations_info_data.append(station_inmet_data)
+        inmet_data.append(station_inmet_data)
 
     print("Saving stations info data...")
     stations_info_data = pd.concat(stations_info_data, axis=0)
