@@ -1,10 +1,11 @@
-import glob
 import os
 import re
 from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
+
+from ..utils import get_all_file_paths
 
 # Paths for data directories
 RAW_DATA_PATH = "data/raw_data/INMET"
@@ -22,27 +23,22 @@ INMET_CLIMATE_DATA_COLS = [
 EXPECTED_INMET_DATA_COLS = ['data', 'hora'] + INMET_CLIMATE_DATA_COLS
 
 
-def get_all_file_paths_from_dir(directory: str, extension: str) -> List[str]:
-    """Get all file paths with a given extension from a directory."""
-    return glob.glob(os.path.join(directory, f"*.{extension}"))
-
-
 def extract_inmet_station_codes() -> List[str]:
     """Extract unique INMET station codes from file names."""
-    file_paths = get_all_file_paths_from_dir(RAW_DATA_PATH, "CSV")
+    file_paths = get_all_file_paths(RAW_DATA_PATH, "CSV")
     stations = {re.search(r"_A\d{3}_", os.path.basename(path)).group()[1:5] for path in file_paths if
                 re.search(r"_A\d{3}_", os.path.basename(path))}
     return list(set(stations))
 
 
-def extract_inmet_file_info(file_path: str) -> dict:
+def extract_inmet_metadata(file_path: str) -> dict:
     """Extract metadata information from an INMET file."""
-    file_info_df = pd.read_csv(file_path, encoding='latin1', nrows=9, header=None, delimiter=';', on_bad_lines='skip').T
-    file_info_df.columns = file_info_df.iloc[0]
-    file_info_df = file_info_df[1:].reset_index(drop=True)
+    metadata = pd.read_csv(file_path, encoding='latin1', nrows=9, header=None, delimiter=';', on_bad_lines='skip').T
+    metadata.columns = metadata.iloc[0]
+    metadata = metadata[1:].reset_index(drop=True)
 
-    if file_info_df.shape[1] != 8:
-        raise Exception(f"File {file_path} has incorrect number of fields: {file_info_df.shape[1]}")
+    if metadata.shape[1] != 8:
+        raise Exception(f"File {file_path} has incorrect number of fields: {metadata.shape[1]}")
 
     column_mapping = {
         'REGIÃO': 'regiao',
@@ -56,21 +52,21 @@ def extract_inmet_file_info(file_path: str) -> dict:
     }
 
     file_info_dict = {}
-    for column in file_info_df.columns:
+    for column in metadata.columns:
         column_upper = column.upper()
         key = next((v for k, v in column_mapping.items() if column_upper.startswith(k)), None)
         if key:
-            value = file_info_df.at[0, column].replace(',', '.') if key in {'latitude', 'longitude', 'altitude'} else \
-            file_info_df.at[0, column]
+            value = metadata.at[0, column].replace(',', '.') if key in {'latitude', 'longitude', 'altitude'} else \
+            metadata.at[0, column]
             file_info_dict[key] = float(value) if key in {'latitude', 'longitude', 'altitude'} else value
 
     return {key: file_info_dict.get(key, np.nan) for key in EXPECTED_INMET_INFO_KEYS}
 
 
-def extract_inmet_file_data(file_path: str) -> pd.DataFrame:
+def extract_inmet_data(file_path: str) -> pd.DataFrame:
     """Extract and preprocess data from an INMET file."""
-    orig_df = pd.read_csv(file_path, encoding='latin1', skiprows=8, header=0, delimiter=';', on_bad_lines='skip')
-    orig_df.replace(['-9999', -9999], np.nan, inplace=True)
+    raw_data = pd.read_csv(file_path, encoding='latin1', skiprows=8, header=0, delimiter=';', on_bad_lines='skip')
+    raw_data = raw_data.replace(['-9999', -9999], np.nan)
 
     column_mapping = {
         'DATA': 'data',
@@ -84,13 +80,13 @@ def extract_inmet_file_data(file_path: str) -> pd.DataFrame:
     }
 
     df = pd.DataFrame()
-    for column in orig_df.columns:
+    for column in raw_data.columns:
         column_upper = column.upper()
         for key, value in column_mapping.items():
             if column_upper.startswith(key):
-                df[value] = orig_df[column].astype(str).str.replace(',', '.').astype(
+                df[value] = raw_data[column].astype(str).str.replace(',', '.').astype(
                     float) if 'total' in value or 'pressao' in value or 'temperatura' in value or 'velocidade' in value else \
-                orig_df[column]
+                raw_data[column]
                 break
 
     if df.shape[1] != 8:
@@ -118,8 +114,8 @@ def preprocess_inmet_data(file_paths: List[str]) -> Tuple[pd.DataFrame, List[str
 
     for file_path in file_paths:
         try:
-            file_info = extract_inmet_file_info(file_path)
-            data_df = extract_inmet_file_data(file_path)
+            file_info = extract_inmet_data(file_path)
+            data_df = extract_inmet_data(file_path)
             for key, value in file_info.items():
                 data_df[key] = value
             data_df = data_df[EXPECTED_INMET_INFO_KEYS + EXPECTED_INMET_DATA_COLS]
@@ -151,7 +147,7 @@ def preprocess_inmet_data(file_paths: List[str]) -> Tuple[pd.DataFrame, List[str
     return output_df, failed_files
 
 
-def save_preprocessed_data(output_df: pd.DataFrame, failed_files: List[str], output_file_name: str = None) -> None:
+def save_inmet_data(output_df: pd.DataFrame, failed_files: List[str], output_file_name: str = None) -> None:
     """Save preprocessed data and failed file information."""
     output_file_name = output_file_name or "merged_data.csv"
     failed_file_name = f"{os.path.splitext(output_file_name)[0]}_failed_files.txt"
@@ -171,10 +167,27 @@ def read_inmet_climate_data(
         output_file_name: str = None
 ) -> Tuple[pd.DataFrame, List[str]]:
     """Read, filter, preprocess, and save INMET climate data."""
-    file_paths = get_all_file_paths_from_dir(RAW_DATA_PATH, "CSV")
+    file_paths = get_all_file_paths(RAW_DATA_PATH, "CSV")
     file_paths = filter_file_paths(file_paths, year_filter, uf_filter, station_filter)
 
     output_df, failed_files = preprocess_inmet_data(file_paths)
-    save_preprocessed_data(output_df, failed_files, output_file_name)
+    save_inmet_data(output_df, failed_files, output_file_name)
 
     return output_df, failed_files
+
+
+def extract_inmet_all_stations_info(output_file_name: str = "station_info.csv") -> pd.DataFrame:
+    """Extract and save metadata for all stations."""
+    file_paths = get_all_file_paths(PREPROCESSED_DATA_PATH, "csv")
+    station_info = pd.DataFrame()
+
+    for file_path in file_paths:
+        metadata = pd.read_csv(file_path, low_memory=False)
+        try:
+            station_info = pd.concat([station_info, metadata[EXPECTED_INMET_INFO_KEYS].iloc[0]], axis=0)
+        except Exception as e:
+            print(file_path)
+            raise e
+
+    save_inmet_data(station_info, [], output_file_name)
+    return station_info

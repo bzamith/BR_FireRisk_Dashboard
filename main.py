@@ -1,4 +1,7 @@
-from src.data_preprocessing.inmet_preprocessing import extract_inmet_station_codes, read_inmet_climate_data
+from src.data_preprocessing.inmet_preprocessing import (
+    extract_inmet_all_stations_info, extract_inmet_station_codes,
+    read_inmet_climate_data
+)
 
 
 def preprocess_inmet_per_station():
@@ -27,3 +30,4 @@ def preprocess_inmet_per_station():
 
 if __name__ == "__main__":
     preprocess_inmet_per_station()
+    extract_inmet_all_stations_info()
