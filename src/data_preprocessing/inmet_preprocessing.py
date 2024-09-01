@@ -1,15 +1,18 @@
 import os
 import re
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
+
 import pandas as pd
+
+from tqdm import tqdm
 
 from ..utils import get_all_file_paths
 
 # Paths for data directories
-RAW_DATA_PATH = "data/raw_data/INMET"
-PREPROCESSED_DATA_PATH = "data/preprocessed_data/INMET"
+RAW_DATA_INMET_PATH = "data/raw_data/INMET"
+PREPROCESSED_DATA_INMET_PATH = f"data/preprocessed_data/INMET"
 
 # Expected keys and columns
 EXPECTED_INMET_INFO_KEYS = [
@@ -23,15 +26,7 @@ INMET_CLIMATE_DATA_COLS = [
 EXPECTED_INMET_DATA_COLS = ['data', 'hora'] + INMET_CLIMATE_DATA_COLS
 
 
-def extract_inmet_station_codes() -> List[str]:
-    """Extract unique INMET station codes from file names."""
-    file_paths = get_all_file_paths(RAW_DATA_PATH, "CSV")
-    stations = {re.search(r"_A\d{3}_", os.path.basename(path)).group()[1:5] for path in file_paths if
-                re.search(r"_A\d{3}_", os.path.basename(path))}
-    return list(set(stations))
-
-
-def extract_inmet_metadata(file_path: str) -> dict:
+def __extract_inmet_station_metadata(file_path: str) -> dict:
     """Extract metadata information from an INMET file."""
     metadata = pd.read_csv(file_path, encoding='latin1', nrows=9, header=None, delimiter=';', on_bad_lines='skip').T
     metadata.columns = metadata.iloc[0]
@@ -40,96 +35,96 @@ def extract_inmet_metadata(file_path: str) -> dict:
     if metadata.shape[1] != 8:
         raise Exception(f"File {file_path} has incorrect number of fields: {metadata.shape[1]}")
 
-    column_mapping = {
-        'REGIÃO': 'regiao',
-        'UF': 'uf',
-        'ESTAÇÃO': 'estacao',
-        'CODIGO': 'codigo_estacao',
-        'LATITUDE': 'latitude',
-        'LONGITUDE': 'longitude',
-        'ALTITUDE': 'altitude',
-        'DATA DE FUNDAÇÃO': 'data_fundacao'
-    }
-
     file_info_dict = {}
-    for column in metadata.columns:
-        column_upper = column.upper()
-        key = next((v for k, v in column_mapping.items() if column_upper.startswith(k)), None)
-        if key:
-            value = metadata.at[0, column].replace(',', '.') if key in {'latitude', 'longitude', 'altitude'} else \
-            metadata.at[0, column]
-            file_info_dict[key] = float(value) if key in {'latitude', 'longitude', 'altitude'} else value
+    for col in metadata.columns:
+        value = metadata.at[0, col]
+        if col in ['REGIAO:', 'REGIÃO:', 'REGI?O:']:
+            file_info_dict['regiao'] = value
+        elif col == 'UF:':
+            file_info_dict['uf'] = value
+        elif col in ['ESTACAO:', 'ESTAÇÃO:', 'ESTAC?O:']:
+            file_info_dict['estacao'] = value
+        elif col in ['CODIGO:', 'CODIGO (WMO):']:
+            file_info_dict['codigo_estacao'] = value
+        elif col == 'LATITUDE:':
+            file_info_dict['latitude'] = float(value.replace(',', '.'))
+        elif col == 'LONGITUDE:':
+            file_info_dict['longitude'] = float(value.replace(',', '.'))
+        elif col == 'ALTITUDE:':
+            file_info_dict['altitude'] = float(value.replace(',', '.'))
+        elif col in ['DATA DE FUNDACAO:', 'DATA DE FUNDAÇÃO (YYYY-MM-DD):', 'DATA DE FUNDAC?O:']:
+            file_info_dict['data_fundacao'] = str(value).replace('/', '-')
+
+    if sorted(list(file_info_dict.keys())) != sorted(EXPECTED_INMET_INFO_KEYS):
+        raise Exception(f"{os.path.basename(file_path)}: Missing columns INMET station metadata. Found: {metadata.columns}")
 
     return {key: file_info_dict.get(key, np.nan) for key in EXPECTED_INMET_INFO_KEYS}
 
 
-def extract_inmet_data(file_path: str) -> pd.DataFrame:
+def __extract_inmet_data(file_path: str) -> pd.DataFrame:
     """Extract and preprocess data from an INMET file."""
+    def __fix_hour(value: str):
+        pattern = re.compile(r'^\d{4} UTC$')
+
+        if pattern.match(value):
+            time_str = value.replace(' UTC', '')
+            time_obj = pd.to_datetime(time_str, format='%H%M')
+            return time_obj.strftime('%H:%M')
+        else:
+            return value
     raw_data = pd.read_csv(file_path, encoding='latin1', skiprows=8, header=0, delimiter=';', on_bad_lines='skip')
     raw_data = raw_data.replace(['-9999', -9999], np.nan)
 
-    column_mapping = {
-        'DATA': 'data',
-        'HORA': 'hora',
-        'PRECIPITAÇÃO TOTAL': 'precipitacao_total',
-        'PRESSAO ATMOSFERICA AO NIVEL DA ESTACAO': 'pressao_atmosferica',
-        'TEMPERATURA DO AR': 'temperatura_ar',
-        'TEMPERATURA DO PONTO DE ORVALHO': 'temperatura_ponto_orvalho',
-        'UMIDADE RELATIVA DO AR': 'umidade_relativa',
-        'VENTO, VELOCIDADE HORARIA': 'velocidade_vento'
-    }
-
     df = pd.DataFrame()
-    for column in raw_data.columns:
-        column_upper = column.upper()
-        for key, value in column_mapping.items():
-            if column_upper.startswith(key):
-                df[value] = raw_data[column].astype(str).str.replace(',', '.').astype(
-                    float) if 'total' in value or 'pressao' in value or 'temperatura' in value or 'velocidade' in value else \
-                raw_data[column]
-                break
+    for col in raw_data.columns:
+        value = raw_data[col]
+        if col in ['DATA (YYYY-MM-DD)', 'Data']:
+            df['data'] = value.astype(str).str.replace('/', '-')
+        elif col in ['HORA (UTC)', 'Hora UTC']:
+            df['hora'] = value.astype(str).apply(__fix_hour)
+        elif col == 'PRECIPITAÇÃO TOTAL, HORÁRIO (mm)':
+            df['precipitacao_total'] = value.astype(str).str.replace(',', '.').astype(float)
+        elif col == 'PRESSAO ATMOSFERICA AO NIVEL DA ESTACAO, HORARIA (mB)':
+            df['pressao_atmosferica'] = value.astype(str).str.replace(',', '.').astype(float)
+        elif col == 'TEMPERATURA DO AR - BULBO SECO, HORARIA (°C)':
+            df['temperatura_ar'] = value.astype(str).str.replace(',', '.').astype(float)
+        elif col == 'TEMPERATURA DO PONTO DE ORVALHO (°C)':
+            df['temperatura_ponto_orvalho'] = value.astype(str).str.replace(',', '.').astype(float)
+        elif col == 'UMIDADE RELATIVA DO AR, HORARIA (%)':
+            df['umidade_relativa'] = value.astype(str).str.replace(',', '.').astype(float)
+        elif col == 'VENTO, VELOCIDADE HORARIA (m/s)':
+            df['velocidade_vento'] = value.astype(str).str.replace(',', '.').astype(float)
 
-    if df.shape[1] != 8:
-        raise Exception(f"Found {df.shape[1]} columns for {file_path} after preprocessing ({df.columns}). Expected 8.")
+    if sorted(df.columns) != sorted(EXPECTED_INMET_DATA_COLS):
+        raise Exception(f"{os.path.basename(file_path)}: Missing columns INMET data. Found: {list(raw_data.columns)}\n {sorted(df.columns)}\n {sorted(EXPECTED_INMET_DATA_COLS)}")
 
     return df
 
 
-def filter_file_paths(file_paths: List[str], year_filter: int = None, uf_filter: str = None,
-                      station_filter: str = None) -> List[str]:
-    """Apply filters to the list of file paths."""
-    if year_filter:
-        file_paths = [f for f in file_paths if f.endswith(f"{year_filter}.CSV")]
-    if uf_filter:
-        file_paths = [f for f in file_paths if f"_{uf_filter.upper()}_" in f]
-    if station_filter:
-        file_paths = [f for f in file_paths if f"_{station_filter.upper()}_" in f]
-    return file_paths
-
-
-def preprocess_inmet_data(file_paths: List[str]) -> Tuple[pd.DataFrame, List[str]]:
-    """Read, preprocess, and merge INMET climate data from files."""
+def __preprocess_inmet_data(file_paths: List[str]) -> pd.DataFrame:
+    """Read, preprocess, and merge INMET data from files."""
     output_dfs = []
-    failed_files = []
 
     for file_path in file_paths:
-        try:
-            file_info = extract_inmet_data(file_path)
-            data_df = extract_inmet_data(file_path)
-            for key, value in file_info.items():
-                data_df[key] = value
-            data_df = data_df[EXPECTED_INMET_INFO_KEYS + EXPECTED_INMET_DATA_COLS]
-            output_dfs.append(data_df)
-        except Exception as e:
-            failed_files.append(f"{os.path.basename(file_path)} - {e}")
+        file_info = __extract_inmet_station_metadata(file_path)
+        data_df = __extract_inmet_data(file_path)
+        for key, value in file_info.items():
+            data_df[key] = value
+        data_df = data_df[EXPECTED_INMET_INFO_KEYS + EXPECTED_INMET_DATA_COLS]
+        output_dfs.append(data_df)
 
     output_df = pd.concat(output_dfs, axis=0)
 
     if output_df[EXPECTED_INMET_DATA_COLS].isna().all(axis=0).all():
-        raise Exception("Only null values found.")
+        raise Exception(f"{os.path.basename(file_path)}: Only null values found.")
 
-    output_df['data'] = pd.to_datetime(output_df['data'], errors='coerce').dt.strftime('%Y-%m-%d')
-    output_df['data_hora'] = pd.to_datetime(output_df['data'] + ' ' + output_df['hora'])
+    output_df = output_df.dropna(subset=['data', 'hora'])
+    if output_df.shape[0] == 0:
+        raise Exception(f"{os.path.basename(file_path)}: No rows left after droping the data and hora NaNs.")
+
+    output_df['data_hora'] = output_df['data'] + ' ' + output_df['hora']
+    output_df['data_hora'] = pd.to_datetime(output_df['data_hora'], format='%Y-%m-%d %H:%M').dt.tz_localize('UTC')
+    output_df = output_df.drop(columns=['data', 'hora'])
 
     output_df = output_df.sort_values(by='data_hora')
     for info_col in EXPECTED_INMET_INFO_KEYS:
@@ -144,50 +139,42 @@ def preprocess_inmet_data(file_paths: List[str]) -> Tuple[pd.DataFrame, List[str
         output_df[interpolacao_col] = output_df[interpolacao_col] | missing_before & output_df[col].notna()
         output_df[col] = round(output_df[col], 2)
 
-    return output_df, failed_files
+    return output_df
 
 
-def save_inmet_data(output_df: pd.DataFrame, failed_files: List[str], output_file_name: str = None) -> None:
-    """Save preprocessed data and failed file information."""
-    output_file_name = output_file_name or "merged_data.csv"
-    failed_file_name = f"{os.path.splitext(output_file_name)[0]}_failed_files.txt"
-
-    os.makedirs(PREPROCESSED_DATA_PATH, exist_ok=True)
-
-    output_df.to_csv(os.path.join(PREPROCESSED_DATA_PATH, output_file_name), index=False)
-    if failed_files:
-        with open(os.path.join(PREPROCESSED_DATA_PATH, failed_file_name), 'w') as file:
-            file.write('\n'.join(failed_files))
+def extract_inmet_station_codes() -> List[str]:
+    """Extract unique INMET station codes from file names."""
+    file_paths = get_all_file_paths(RAW_DATA_INMET_PATH, "CSV")
+    stations = {re.search(r"_A\d{3}_", os.path.basename(path)).group()[1:5] for path in file_paths if
+                re.search(r"_A\d{3}_", os.path.basename(path))}
+    return list(set(stations))
 
 
-def read_inmet_climate_data(
-        year_filter: int = None,
-        uf_filter: str = None,
-        station_filter: str = None,
-        output_file_name: str = None
-) -> Tuple[pd.DataFrame, List[str]]:
+def read_inmet_climate_data() -> None:
     """Read, filter, preprocess, and save INMET climate data."""
-    file_paths = get_all_file_paths(RAW_DATA_PATH, "CSV")
-    file_paths = filter_file_paths(file_paths, year_filter, uf_filter, station_filter)
+    stations = extract_inmet_station_codes()
+    file_paths = get_all_file_paths(RAW_DATA_INMET_PATH, "CSV")
+    total_stations = len(stations)
+    
+    stations_info_data = []
+    inmet_data = []
 
-    output_df, failed_files = preprocess_inmet_data(file_paths)
-    save_inmet_data(output_df, failed_files, output_file_name)
+    output_dir = f"{PREPROCESSED_DATA_INMET_PATH}/per_station"
+    os.makedirs(output_dir, exist_ok=True)
 
-    return output_df, failed_files
+    for station in tqdm(stations, total=total_stations, desc="Processing Stations"):
+        station_file_paths = [f for f in file_paths if f"_{station.upper()}_" in f]
+        station_inmet_data = __preprocess_inmet_data(station_file_paths)
 
+        station_inmet_data.to_csv(f"{output_dir}/inmet_{station}.csv", index=False)
+        
+        stations_info_data.append(stations_info_data)
+        inmet_data.append(inmet_data)
 
-def extract_inmet_all_stations_info(output_file_name: str = "station_info.csv") -> pd.DataFrame:
-    """Extract and save metadata for all stations."""
-    file_paths = get_all_file_paths(PREPROCESSED_DATA_PATH, "csv")
-    station_info = pd.DataFrame()
+    print("Saving stations info data...")
+    stations_info_data = pd.concat(stations_info_data, axis=0)
+    stations_info_data.to_csv(f"{PREPROCESSED_DATA_INMET_PATH}/inmet_stations_info.csv", index=False)
 
-    for file_path in file_paths:
-        metadata = pd.read_csv(file_path, low_memory=False)
-        try:
-            station_info = pd.concat([station_info, metadata[EXPECTED_INMET_INFO_KEYS].iloc[0]], axis=0)
-        except Exception as e:
-            print(file_path)
-            raise e
-
-    save_inmet_data(station_info, [], output_file_name)
-    return station_info
+    print("Saving INMET data...")
+    inmet_data = pd.concat(inmet_data, axis=0)
+    inmet_data.to_csv(f"{PREPROCESSED_DATA_INMET_PATH}/inmet_data.csv", index=False)
