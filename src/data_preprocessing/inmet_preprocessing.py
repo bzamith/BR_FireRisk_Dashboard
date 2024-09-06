@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 
@@ -20,7 +20,7 @@ PREPROCESSED_DATA_INMET_PATH = f"data/preprocessed_data/INMET"
 # Expected keys and columns
 EXPECTED_INMET_INFO_KEYS = [
     'regiao', 'uf', 'estacao', 'codigo_estacao',
-    'latitude', 'longitude', 'altitude', 'data_fundacao'
+    'latitude', 'longitude', 'altitude'
 ]
 INMET_CLIMATE_DATA_COLS = [
     'precipitacao_total', 'pressao_atmosferica', 'temperatura_ar',
@@ -55,8 +55,6 @@ def __extract_inmet_station_metadata(file_path: str) -> dict:
             file_info_dict['longitude'] = float(value.replace(',', '.'))
         elif col == 'ALTITUDE:':
             file_info_dict['altitude'] = float(value.replace(',', '.'))
-        elif col in ['DATA DE FUNDACAO:', 'DATA DE FUNDAÇÃO (YYYY-MM-DD):', 'DATA DE FUNDAC?O:']:
-            file_info_dict['data_fundacao'] = str(value).replace('/', '-')
 
     if sorted(list(file_info_dict.keys())) != sorted(EXPECTED_INMET_INFO_KEYS):
         raise Exception(f"{os.path.basename(file_path)}: Missing columns INMET station metadata. Found: {metadata.columns}")
@@ -75,12 +73,12 @@ def __extract_inmet_data(file_path: str) -> pd.DataFrame:
             return time_obj.strftime('%H:%M')
         else:
             return value
-    raw_data = pd.read_csv(file_path, encoding='latin1', skiprows=8, header=0, delimiter=';', on_bad_lines='skip')
-    raw_data = raw_data.replace(['-9999', -9999], np.nan)
+    raw_df = pd.read_csv(file_path, encoding='latin1', skiprows=8, header=0, delimiter=';', on_bad_lines='skip')
+    raw_df = raw_df.replace(['-9999', -9999], np.nan)
 
     df = pd.DataFrame()
-    for col in raw_data.columns:
-        value = raw_data[col]
+    for col in raw_df.columns:
+        value = raw_df[col]
         if col in ['DATA (YYYY-MM-DD)', 'Data']:
             df['data'] = value.astype(str).str.replace('/', '-')
         elif col in ['HORA (UTC)', 'Hora UTC']:
@@ -99,7 +97,7 @@ def __extract_inmet_data(file_path: str) -> pd.DataFrame:
             df['velocidade_vento'] = value.astype(str).str.replace(',', '.').astype(float)
 
     if sorted(df.columns) != sorted(EXPECTED_INMET_DATA_COLS):
-        raise Exception(f"{os.path.basename(file_path)}: Missing columns INMET data. Found: {list(raw_data.columns)}\n {sorted(df.columns)}\n {sorted(EXPECTED_INMET_DATA_COLS)}")
+        raise Exception(f"{os.path.basename(file_path)}: Missing columns INMET data. Found: {list(df.columns)}\n, expected: {sorted(EXPECTED_INMET_DATA_COLS)}")
 
     return df
 
@@ -132,7 +130,6 @@ def __group_daily_inmet_data(df: pd.DataFrame) -> pd.DataFrame:
         'latitude': 'first',
         'longitude': 'first',
         'altitude': 'first',
-        'data_fundacao': 'first',
         'precipitacao_total': 'sum',
         'pressao_atmosferica': 'mean',
         'temperatura_ar': 'mean',
@@ -228,31 +225,31 @@ def extract_inmet_station_codes() -> List[str]:
     return sorted(list(set(stations)))
 
 
-def read_inmet_climate_data() -> None:
+def process_and_save_inmet_climate_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Read, filter, preprocess, and save INMET climate data."""
     stations = extract_inmet_station_codes()
     file_paths = get_all_file_paths(RAW_DATA_INMET_PATH, "CSV")
     total_stations = len(stations)
     
-    stations_info_data = []
-    inmet_data = []
+    inmet_df = []
 
     output_dir = f"{PREPROCESSED_DATA_INMET_PATH}/per_station"
     os.makedirs(output_dir, exist_ok=True)
 
-    for station in tqdm(stations, total=total_stations, desc="Processing Stations"):
+    for station in tqdm(stations, total=total_stations, desc="Processing INMET"):
         station_file_paths = [f for f in file_paths if f"_{station.upper()}_" in f]
-        station_inmet_data = __preprocess_inmet_data(station_file_paths)
+        station_inmet_df = __preprocess_inmet_data(station_file_paths)
 
-        station_inmet_data.to_csv(f"{output_dir}/inmet_{station}.csv", index=False)
+        station_inmet_df.to_csv(f"{output_dir}/inmet_{station}.csv", index=False)
         
-        stations_info_data.append(station_inmet_data)
-        inmet_data.append(station_inmet_data)
-
-    print("Saving stations info data...")
-    stations_info_data = pd.concat(stations_info_data, axis=0)
-    stations_info_data.to_csv(f"{PREPROCESSED_DATA_INMET_PATH}/inmet_stations_info.csv", index=False)
+        inmet_df.append(station_inmet_df)
 
     print("Saving INMET data...")
-    inmet_data = pd.concat(inmet_data, axis=0)
-    inmet_data.to_csv(f"{PREPROCESSED_DATA_INMET_PATH}/inmet_data.csv", index=False)
+    inmet_df = pd.concat(inmet_df, axis=0)
+    inmet_df.to_csv(f"{PREPROCESSED_DATA_INMET_PATH}/inmet_data.csv", index=False)
+
+    print("Saving stations info data...")
+    stations_info_df = inmet_df[EXPECTED_INMET_INFO_KEYS].drop_duplicates().reset_index(drop=True)
+    stations_info_df.to_csv(f"{PREPROCESSED_DATA_INMET_PATH}/inmet_stations_info.csv", index=False)
+
+    return stations_info_df, inmet_df
