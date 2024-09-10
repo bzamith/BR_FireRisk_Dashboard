@@ -169,7 +169,7 @@ def __group_daily_inmet_data(df: pd.DataFrame) -> pd.DataFrame:
 def __calculate_days_without_rain_inmet_data(df: pd.DataFrame) -> pd.DataFrame:
     df['rained'] = df['precipitacao_total'] == 0
     df['rain_sequence'] = df['rained'].ne(df['rained'].shift()).cumsum()
-    df['dias_sem_chuva'] = df.groupby('rain_sequence').cumcount() + 1
+    df['dias_sem_chuva'] = df.groupby('rain_sequence').cumcount()
     df = df.drop(columns=['rained', 'rain_sequence'])
     return df
 
