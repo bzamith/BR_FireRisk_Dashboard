@@ -72,3 +72,5 @@ cython_debug/
 
 # Project
 data/
+forecasting/
+.~BR_FireRisk_Dash*

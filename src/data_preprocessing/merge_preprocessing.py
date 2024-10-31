@@ -8,6 +8,7 @@ SELECTED_INPE_HOTSPOTS_DAILY_DATA_COLS = [
     'data', 'codigo_estacao_mais_proxima', 'distancia_estacao_mais_proxima', 'latitude', 'longitude', 'bioma'
 ]
 
+
 def merge_and_save_data(
     inmet_df: pd.DataFrame,
     inpe_hotspots_daily_df: pd.DataFrame,
