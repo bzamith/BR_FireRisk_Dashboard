@@ -34,7 +34,7 @@ OBSERVATION_WINDOW = 14
 EPOCHS = 50
 BATCH_SIZE = 32
 
-FORECASTING_PATH = "forecasting"
+FORECASTING_PATH = "src/forecasting"
 FORECASTING_FORECASTERS_PATH = f"{FORECASTING_PATH}/forecasters"
 FORECASTING_SCALERS_PATH = f"{FORECASTING_PATH}/scalers"
 FORECASTING_METRICS_PATH = f"{FORECASTING_PATH}/metrics"
@@ -189,3 +189,60 @@ def train_and_save_forecasting_data(df: pd.DataFrame):
             station_results[variable] = results
         save_models_and_metrics(station_results, station)
         plot_results(station_results, station)
+
+
+def predict(df: pd.DataFrame, days_ahead: int=7) -> pd.DataFrame:
+    future_predictions_list = []
+
+    stations = df['codigo_estacao'].unique()
+    for station in tqdm(stations, desc="Training for each station"):
+        for variable in tqdm(FORECASTING_VARIABLES, desc="Training for each variable"):
+            forecaster_file_name = f"{FORECASTING_FORECASTERS_PATH}/{station}_{variable}_forecaster.keras"
+            scaler_file_name = f"{FORECASTING_SCALERS_PATH}/{station}_{variable}_scaler.joblib"
+
+            if not os.path.exists(forecaster_file_name) or not os.path.exists(scaler_file_name):
+                raise FileNotFoundError(
+                    f"Model or scaler for station '{station}' and variable '{variable}' not found."
+                )
+
+            model = tf.keras.models.load_model(forecaster_file_name)
+            scaler = joblib.load(scaler_file_name)
+
+            station_data = df[df['codigo_estacao'] == station][['data', variable]].set_index('data')
+            if len(station_data) < OBSERVATION_WINDOW:
+                print(f"Insufficient data for future prediction at station '{station}' and variable '{variable}'.")
+                continue
+            
+            last_data = station_data[-OBSERVATION_WINDOW:]
+            scaled_last_data = scaler.transform(last_data)
+
+            future_scaled = scaled_last_data.copy()
+            future_predictions = []
+
+            for _ in range(days_ahead):
+                X = future_scaled[-OBSERVATION_WINDOW:].reshape(1, OBSERVATION_WINDOW, -1)
+                next_scaled = model.predict(X)[0, 0]
+                future_predictions.append(next_scaled)
+
+                new_entry = np.array([next_scaled]).reshape(1, -1)
+                future_scaled = np.vstack([future_scaled, new_entry])
+            
+            future_predictions_unscaled = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
+            
+            last_date = pd.to_datetime(station_data.index[-1])
+            future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days_ahead)
+
+            station_predictions = pd.DataFrame({
+                'codigo_estacao': station,
+                'variavel': variable,
+                'data': future_dates,
+                'previsao': future_predictions_unscaled
+            })
+            future_predictions_list.append(station_predictions)
+
+    if future_predictions_list:
+        future_predictions_df = pd.concat(future_predictions_list, ignore_index=True)
+    else:
+        future_predictions_df = pd.DataFrame(columns=['codigo_estacao', 'variavel', 'data', 'previsao'])
+
+    return future_predictions_df
